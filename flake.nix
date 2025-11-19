@@ -14,40 +14,18 @@
       {
         packages.default = pkgs.buildGoModule rec {
           pname = "wg-ddns";
-          version = "0.1.0";
+          version = "0.1.2";
 
           src = ./.;
 
           vendorHash = "sha256-VfSLrWuvJF4XwAW2BQGxh+3v9RiWmPdysw/nIdt2A9M=";
-
-          nativeBuildInputs = with pkgs; [
-            go
-            git
-          ];
-
-          # Generate Swagger docs before building;
-          preBuild = ''
-            export HOME=$TMPDIR
-            export GOPATH=$TMPDIR/go
-            export PATH=$GOPATH/bin:$PATH
-            export GOPROXY=direct
-            export GOSUMDB=off
-            go mod download
-            GOFLAGS="-mod=mod" go install github.com/swaggo/swag/cmd/swag@latest
-            GOFLAGS="-mod=mod" swag init --parseDependency --parseInternal
-          '';
 
           ldflags = [ "-s" "-w" ];
 
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp wg-ddns $out/bin/
-
-            # Install systemd service files;
-            mkdir -p $out/lib/systemd/system
-            cp wg-ddns.service $out/lib/systemd/system/
-            cp wg-ddns@.service $out/lib/systemd/system/
+            install -Dm755 $GOPATH/bin/wg-ddns $out/bin/wg-ddns
             runHook postInstall
           '';
 
