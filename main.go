@@ -94,7 +94,8 @@ type Config struct {
 	Interface string
 	Endpoint  string
 	Hostname  string
-	LastIP    net.IP
+	LastIPv4  net.IP
+	LastIPv6  net.IP
 }
 
 type DDNSMonitor struct {
@@ -270,11 +271,19 @@ func performCheckOnly(singleInterface string) {
 		fmt.Printf("%d. Interface: %s\n", i+1, config.Interface)
 		fmt.Printf("   Endpoint: %s\n", config.Endpoint)
 		fmt.Printf("   Hostname: %s\n", config.Hostname)
-		if config.LastIP != nil {
-			fmt.Printf("   Current IP: %s\n", config.LastIP)
+
+		if config.LastIPv4 != nil {
+			fmt.Printf("   IPv4: %s\n", config.LastIPv4)
 		} else {
-			fmt.Printf("   Current IP: (failed to resolve)\n")
+			fmt.Printf("   IPv4: (not resolved)\n")
 		}
+
+		if config.LastIPv6 != nil {
+			fmt.Printf("   IPv6: %s\n", config.LastIPv6)
+		} else {
+			fmt.Printf("   IPv6: (not resolved)\n")
+		}
+
 		fmt.Println()
 	}
 }
@@ -309,7 +318,6 @@ func parseWireGuardConfigForCheck(interfaceName, configPath string, configs *[]C
 
 	scanner := bufio.NewScanner(file)
 	endpointRegex := regexp.MustCompile(`^\s*Endpoint\s*=\s*(.+)$`)
-	ipRegex := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+`)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -322,19 +330,29 @@ func parseWireGuardConfigForCheck(interfaceName, configPath string, configs *[]C
 				continue
 			}
 
-			if !ipRegex.MatchString(host) {
-				config := Config{
-					Interface: interfaceName,
-					Endpoint:  endpoint,
-					Hostname:  host,
-				}
-
-				if ip, err := net.ResolveIPAddr("ip4", host); err == nil {
-					config.LastIP = ip.IP
-				}
-
-				*configs = append(*configs, config)
+			// Check if host is already an IP address (IPv4 or IPv6)
+			if net.ParseIP(host) != nil {
+				continue
 			}
+
+			// Host is a domain name, resolve both IPv4 and IPv6
+			config := Config{
+				Interface: interfaceName,
+				Endpoint:  endpoint,
+				Hostname:  host,
+			}
+
+			// Resolve IPv4 (A record)
+			if ipv4, err := net.ResolveIPAddr("ip4", host); err == nil {
+				config.LastIPv4 = ipv4.IP
+			}
+
+			// Resolve IPv6 (AAAA record)
+			if ipv6, err := net.ResolveIPAddr("ip6", host); err == nil {
+				config.LastIPv6 = ipv6.IP
+			}
+
+			*configs = append(*configs, config)
 		}
 	}
 
@@ -495,7 +513,6 @@ func (m *DDNSMonitor) parseWireGuardConfig(interfaceName, configPath string) err
 
 	scanner := bufio.NewScanner(file)
 	endpointRegex := regexp.MustCompile(`^\s*Endpoint\s*=\s*(.+)$`)
-	ipRegex := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+`)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -508,20 +525,31 @@ func (m *DDNSMonitor) parseWireGuardConfig(interfaceName, configPath string) err
 				continue
 			}
 
-			if !ipRegex.MatchString(host) {
-				config := Config{
-					Interface: interfaceName,
-					Endpoint:  endpoint,
-					Hostname:  host,
-				}
-
-				if ip, err := net.ResolveIPAddr("ip4", host); err == nil {
-					config.LastIP = ip.IP
-				}
-
-				m.configs = append(m.configs, config)
-				logger.Debug("Found domain endpoint: %s -> %s (interface: %s)", host, config.LastIP, interfaceName)
+			// Check if host is already an IP address (IPv4 or IPv6)
+			if net.ParseIP(host) != nil {
+				continue
 			}
+
+			// Host is a domain name, resolve both IPv4 and IPv6
+			config := Config{
+				Interface: interfaceName,
+				Endpoint:  endpoint,
+				Hostname:  host,
+			}
+
+			// Resolve IPv4 (A record)
+			if ipv4, err := net.ResolveIPAddr("ip4", host); err == nil {
+				config.LastIPv4 = ipv4.IP
+				logger.Debug("Found domain endpoint: %s -> %s (IPv4, interface: %s)", host, ipv4.IP, interfaceName)
+			}
+
+			// Resolve IPv6 (AAAA record)
+			if ipv6, err := net.ResolveIPAddr("ip6", host); err == nil {
+				config.LastIPv6 = ipv6.IP
+				logger.Debug("Found domain endpoint: %s -> %s (IPv6, interface: %s)", host, ipv6.IP, interfaceName)
+			}
+
+			m.configs = append(m.configs, config)
 		}
 	}
 
@@ -531,22 +559,44 @@ func (m *DDNSMonitor) parseWireGuardConfig(interfaceName, configPath string) err
 func (m *DDNSMonitor) checkEndpoints() {
 	for i := range m.configs {
 		config := &m.configs[i]
+		needsRestart := false
 
 		logger.Debug("Resolving DNS for %s (interface: %s)", config.Hostname, config.Interface)
-		currentIP, err := net.ResolveIPAddr("ip4", config.Hostname)
+
+		// Check IPv4 (A record)
+		currentIPv4, err := net.ResolveIPAddr("ip4", config.Hostname)
 		if err != nil {
-			logger.Warn("Failed to resolve %s: %v", config.Hostname, err)
-			continue
+			logger.Debug("Failed to resolve IPv4 for %s: %v", config.Hostname, err)
+		} else {
+			logger.Debug("DNS resolution result for %s: %s (IPv4, interface: %s)", config.Hostname, currentIPv4.IP, config.Interface)
+
+			// Check if IPv4 changed
+			if !ipEqual(config.LastIPv4, currentIPv4.IP) {
+				logger.Warn("IPv4 change detected for %s: %s -> %s (interface: %s)",
+					config.Hostname, config.LastIPv4, currentIPv4.IP, config.Interface)
+				config.LastIPv4 = currentIPv4.IP
+				needsRestart = true
+			}
 		}
 
-		logger.Debug("DNS resolution result for %s: %s (interface: %s)", config.Hostname, currentIP.IP, config.Interface)
+		// Check IPv6 (AAAA record)
+		currentIPv6, err := net.ResolveIPAddr("ip6", config.Hostname)
+		if err != nil {
+			logger.Debug("Failed to resolve IPv6 for %s: %v", config.Hostname, err)
+		} else {
+			logger.Debug("DNS resolution result for %s: %s (IPv6, interface: %s)", config.Hostname, currentIPv6.IP, config.Interface)
 
-		if !config.LastIP.Equal(currentIP.IP) {
-			logger.Warn("IP change detected for %s: %s -> %s (interface: %s)",
-				config.Hostname, config.LastIP, currentIP.IP, config.Interface)
+			// Check if IPv6 changed
+			if !ipEqual(config.LastIPv6, currentIPv6.IP) {
+				logger.Warn("IPv6 change detected for %s: %s -> %s (interface: %s)",
+					config.Hostname, config.LastIPv6, currentIPv6.IP, config.Interface)
+				config.LastIPv6 = currentIPv6.IP
+				needsRestart = true
+			}
+		}
 
-			config.LastIP = currentIP.IP
-
+		// Restart interface if any IP changed
+		if needsRestart {
 			if err := m.restartWireGuardService(config.Interface); err != nil {
 				logger.Error("Failed to restart wg-quick@%s: %v", config.Interface, err)
 			} else {
@@ -554,6 +604,17 @@ func (m *DDNSMonitor) checkEndpoints() {
 			}
 		}
 	}
+}
+
+// ipEqual compares two IP addresses, handling nil values
+func ipEqual(ip1, ip2 net.IP) bool {
+	if ip1 == nil && ip2 == nil {
+		return true
+	}
+	if ip1 == nil || ip2 == nil {
+		return false
+	}
+	return ip1.Equal(ip2)
 }
 
 func (m *DDNSMonitor) restartWireGuardService(interfaceName string) error {
@@ -716,12 +777,25 @@ func (m *DDNSMonitor) handleListInterfaces(c *gin.Context) {
 
 	interfaces := make([]map[string]interface{}, 0, len(m.configs))
 	for _, config := range m.configs {
-		interfaces = append(interfaces, map[string]interface{}{
+		interfaceInfo := map[string]interface{}{
 			"interface": config.Interface,
 			"endpoint":  config.Endpoint,
 			"hostname":  config.Hostname,
-			"last_ip":   config.LastIP.String(),
-		})
+		}
+
+		if config.LastIPv4 != nil {
+			interfaceInfo["ipv4"] = config.LastIPv4.String()
+		} else {
+			interfaceInfo["ipv4"] = nil
+		}
+
+		if config.LastIPv6 != nil {
+			interfaceInfo["ipv6"] = config.LastIPv6.String()
+		} else {
+			interfaceInfo["ipv6"] = nil
+		}
+
+		interfaces = append(interfaces, interfaceInfo)
 	}
 
 	response := map[string]interface{}{
