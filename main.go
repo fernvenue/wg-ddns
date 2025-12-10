@@ -24,7 +24,7 @@ import (
 	_ "github.com/fernvenue/wg-ddns/docs"
 )
 
-const Version = "1.2"
+const Version = "1.3"
 
 type LogLevel int
 
