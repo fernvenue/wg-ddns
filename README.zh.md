@@ -49,13 +49,19 @@
 
 通過 Nix 包管理器，你可以輕鬆安装 wg-ddns:
 
+- 從 nixpkgs 安装
+
+```bash
+nix profile install nixpkgs#wg-ddns
+```
+
 - 從 GitHub 倉庫安装
 
 ```bash
 nix profile install github:fernvenue/wg-ddns
 ```
 
-- 或從本地源碼構建
+- 從本地源碼構建
 
 ```bash
 git clone https://github.com/fernvenue/wg-ddns.git
